@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import whisper
 import openai
+import argparse
 
 # 加载环境变量
 load_dotenv()
@@ -81,16 +82,9 @@ AI_MODEL = "google/gemini-pro"  # 使用 Gemini Pro 模型
 if openrouter_api_key:
     try:
         print(f"正在测试 OpenRouter API 连接...")
-        response = client.chat.completions.create(
-            model=AI_MODEL,
-            messages=[
-                {"role": "user", "content": "你好"}
-            ]
-        )
-        
-        if response.choices:
-            print("✅ OpenRouter API 连接测试成功")
-            openrouter_available = True
+        response = client.models.list()  # 使用更简单的API调用来测试连接
+        print("✅ OpenRouter API 连接测试成功")
+        openrouter_available = True
     except Exception as e:
         print(f"⚠️ OpenRouter API 连接测试失败: {str(e)}")
         print("将继续尝试使用API，但可能会遇到问题")
@@ -139,10 +133,10 @@ class DownloadError(Exception):
         super().__init__(self.message)
 
 class VideoNoteGenerator:
-    def __init__(self, output_dir: str = "generated_notes"):
+    def __init__(self, output_dir: str = "temp_notes"):
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
-
+        
         self.openrouter_available = openrouter_available
         self.unsplash_client = unsplash_client
         self.ffmpeg_path = ffmpeg_path
@@ -417,9 +411,10 @@ class VideoNoteGenerator:
             print("正在转录音频（这可能需要几分钟）...")
             result = self.whisper_model.transcribe(
                 audio_path,
-                language='zh',  # 指定中文以提高准确性
+                language='zh',  # 指定中文
                 task='transcribe',
-                best_of=5
+                best_of=5,
+                initial_prompt="以下是一段视频的转录内容。请用流畅的中文输出。"  # 添加中文提示
             )
             return result["text"].strip()
             
@@ -427,221 +422,254 @@ class VideoNoteGenerator:
             print(f"⚠️ 音频转录失败: {str(e)}")
             return ""
 
-    def _organize_long_content(self, content: str) -> str:
-        """使用AI整理长文内容"""
-        if not self.openrouter_available:
-            return content
-
+    def _organize_content(self, content: str) -> str:
+        """使用AI整理内容"""
         try:
-            # 分段处理长文本
-            def split_content(text, max_chars=2000):
-                # 按句号分割文本
-                sentences = text.split('。')
-                chunks = []
-                current_chunk = []
-                current_length = 0
-                
-                for sentence in sentences:
-                    # 确保句子以句号结尾
-                    sentence = sentence.strip() + '。'
-                    sentence_length = len(sentence)
-                    
-                    if current_length + sentence_length > max_chars and current_chunk:
-                        # 当前块已满，保存并开始新块
-                        chunks.append(''.join(current_chunk))
-                        current_chunk = [sentence]
-                        current_length = sentence_length
-                    else:
-                        # 添加句子到当前块
-                        current_chunk.append(sentence)
-                        current_length += sentence_length
-                
-                # 添加最后一个块
-                if current_chunk:
-                    chunks.append(''.join(current_chunk))
-                
-                return chunks
+            if not self.openrouter_available:
+                print("⚠️ OpenRouter API 未配置，将返回原始内容")
+                return content
 
-            # 构建编辑提示词
-            system_prompt = """你是一位出版社的资深编辑，有20年的丰富工作资历。你擅长把各种杂乱的资料，理出头绪。
-请一步步思考，输出markdown格式的内容，不要输出任何与要求无关的内容，更不要进行总结。
-请保持严谨的学术态度，确保输出的内容既专业又易读。
-
-特别注意：
-1. 这是一个长文的其中一部分
-2. 保持内容的连贯性
-3. 不要随意删减重要信息
-4. 使用markdown格式组织内容
-5. 确保每个要点都得到保留"""
-
-            # 分段处理内容
-            content_chunks = split_content(content)
-            organized_chunks = []
-            
-            print(f"内容将分为 {len(content_chunks)} 个部分处理...")
-            
-            for i, chunk in enumerate(content_chunks, 1):
-                print(f"正在处理第 {i}/{len(content_chunks)} 部分...")
-                
-                # 添加上下文信息
-                context = f"这是文章的第 {i}/{len(content_chunks)} 部分。" if len(content_chunks) > 1 else ""
-                
-                user_prompt = f"""请将以下内容整理成结构清晰的文章片段，要求：
-1. 保持原文的核心信息和专业性
-2. 使用markdown格式
-3. 按照逻辑顺序组织内容
-4. 适当添加标题和分段
-5. 确保可读性的同时不损失重要信息
-
-{context}
-
-原文内容：
-
-{chunk}"""
-
-                # 调用API
-                response = client.chat.completions.create(
-                    model=AI_MODEL,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=4000
-                )
-                
-                if response.choices:
-                    organized_chunk = response.choices[0].message.content.strip()
-                    organized_chunks.append(organized_chunk)
-                    
-            # 合并所有处理后的内容
-            final_content = "\n\n".join(organized_chunks)
-            
-            # 如果有多个部分，再处理一次以确保整体连贯性
-            if len(organized_chunks) > 1:
-                print("正在优化整体内容连贯性...")
-                
-                final_prompt = """请检查并优化以下文章的整体连贯性，要求：
-1. 确保各部分之间的过渡自然
-2. 消除可能的重复内容
-3. 统一文章的风格和格式
-4. 保持markdown格式
-5. 不要删减重要信息
-
-原文内容：
-
-{final_content}"""
-
-                response = client.chat.completions.create(
-                    model=AI_MODEL,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": final_prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=4000
-                )
-                
-                if response.choices:
-                    final_content = response.choices[0].message.content.strip()
-            
-            return final_content
-                
-        except Exception as e:
-            print(f"⚠️ 长文整理失败: {str(e)}")
-            return content
-
-    def _optimize_content_format(self, content: str) -> Tuple[str, List[str], List[str]]:
-        """使用OpenRouter优化内容格式并生成标题"""
-        if not self.openrouter_available:
-            return content, ["笔记"], []
-
-        try:
             # 构建系统提示词
-            system_prompt = """你是一名专注在小红书平台上的写作专家，具有丰富的社交媒体写作背景和市场推广经验。
+            system_prompt = """你是一位著名的科普作家和博客作者，著作等身，屡获殊荣，尤其在内容创作领域有深厚的造诣。
 
-专业技能：
-1. 标题创作技巧：
-   - 二极管标题法：
-     * 正面刺激：产品/方法 + 即时效果 + 逆天效果
-     * 负面刺激：你不xx + 绝对后悔 + 紧迫感
-   - 标题要素：
-     * 使用惊叹号、省略号增强表达力
-     * 采用挑战性和悬念的表述
-     * 描述具体成果和效果
-     * 融入热点话题和实用工具
-     * 必须包含emoji表情
+请使用 4C 模型（建立联系 Connection、展示冲突 Conflict、强调改变 Change、即时收获 Catch）为转录的文字内容创建结构。
 
-2. 爆款关键词库：
-   - 高情感词：绝绝子、宝藏、神器、YYDS、秘方、好用哭了
-   - 吸引词：搞钱必看、狠狠搞钱、吐血整理、万万没想到
-   - 专业词：建议收藏、划重点、干货、秘籍、指南
-   - 情感词：治愈、破防了、泪目、感动、震撼
-   - 品质词：高级感、一级棒、无敌了、太绝了
+写作要求：
+- 从用户的问题出发，引导读者理解核心概念及其背景
+- 使用第二人称与读者对话，语气亲切平实
+- 确保所有观点和内容基于用户提供的转录文本
+- 如无具体实例，则不编造
+- 涉及复杂逻辑时，使用直观类比
+- 避免内容重复冗余
+- 逻辑递进清晰，从问题开始，逐步深入
 
-3. 写作风格：
-   - 开篇：直击痛点，制造共鸣
-   - 语气：热情、亲切、口语化
-   - 结构：步骤说明 + 要点总结
-   - 段落：每段都要用emoji表情点缀
-   - 互动：设置悬念，引导评论
-   - 配图：选择高质量、相关性强的图片
-
-4. SEO标签规则：
-   - 核心关键词：主题核心词（例：职场、学习、技能）
-   - 关联关键词：核心词相关标签（例：职场技巧、学习方法）
-   - 高转化词：带购买意向（例：必看、推荐、测评）
-   - 热搜词：当前热点（例：AIGC、效率工具）
-   - 人群词：目标受众（例：职场人、学生党）
-
-5. 小红书平台特性：
-   - 标题控制在20字以内，简短有力
-   - 使用emoji增加活力
-   - 分段清晰，重点突出
-   - 语言接地气，避免过于正式
-   - 善用数字、清单形式
-   - 突出实用性和可操作性"""
+Markdown格式要求：
+- 大标题突出主题，吸引眼球，最好使用疑问句
+- 小标题简洁有力，结构清晰，尽量使用单词或短语
+- 直入主题，在第一部分清晰阐述问题和需求
+- 正文使用自然段，避免使用列表形式
+- 内容翔实，避免过度简略，特别注意保留原文中的数据和示例信息
+- 如有来源URL，使用文内链接形式
+- 保留原文中的Markdown格式图片链接"""
 
             # 构建用户提示词
-            user_prompt = f"""请将以下内容改写成小红书爆款笔记，要求：
+            final_prompt = f"""请根据以下转录文字内容，创作一篇结构清晰、易于理解的博客文章。
 
-1. 标题创作（生成3个）：
-   - 必须包含emoji
-   - 其中2个标题在20字以内
-   - 运用二极管标题法
-   - 使用爆款关键词
-   - 体现内容核心价值
+转录文字内容：
 
-2. 内容改写：
-   - 开篇要吸引眼球
-   - 每段都要用emoji装饰
-   - 语言要口语化、有趣
-   - 适当使用爆款词
-   - 突出干货和重点
-   - 设置悬念和互动点
-   - 结尾要有收束和号召
+{content}"""
 
-3. 标签生成：
-   - 包含核心关键词
-   - 包含热门话题词
-   - 包含人群标签
-   - 包含价值标签
-   - 所有标签都以#开头
+            # 调用API
+            response = client.chat.completions.create(
+                model=AI_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": final_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=4000
+            )
+            
+            if response.choices:
+                return response.choices[0].message.content.strip()
+            
+            return content
 
-原文内容：
+        except Exception as e:
+            print(f"⚠️ 内容整理失败: {str(e)}")
+            return content
+
+    def split_content(self, text: str, max_chars: int = 2000) -> List[str]:
+        """按段落分割文本，保持上下文的连贯性
+        
+        特点：
+        1. 保持段落完整性：不会在段落中间断开
+        2. 保持句子完整性：确保句子不会被截断
+        3. 添加重叠内容：每个chunk都包含上一个chunk的最后一段
+        4. 智能分割：对于超长段落，按句子分割并保持完整性
+        """
+        if not text:
+            return []
+
+        paragraphs = text.split('\n\n')
+        chunks = []
+        current_chunk = []
+        current_length = 0
+        last_paragraph = None  # 用于存储上一个chunk的最后一段
+        
+        for para in paragraphs:
+            para = para.strip()
+            if not para:  # 跳过空段落
+                continue
+            
+            para_length = len(para)
+            
+            # 如果这是新chunk的开始，且有上一个chunk的最后一段，添加它作为上下文
+            if not current_chunk and last_paragraph:
+                current_chunk.append(f"上文概要：\n{last_paragraph}\n")
+                current_length += len(last_paragraph) + 20  # 加上标题的长度
+            
+            # 如果单个段落就超过了最大长度，需要按句子分割
+            if para_length > max_chars:
+                # 如果当前块不为空，先保存
+                if current_chunk:
+                    last_paragraph = current_chunk[-1]
+                    chunks.append('\n\n'.join(current_chunk))
+                    current_chunk = []
+                    current_length = 0
+                    if last_paragraph:
+                        current_chunk.append(f"上文概要：\n{last_paragraph}\n")
+                        current_length += len(last_paragraph) + 20
+                
+                # 按句子分割长段落
+                sentences = re.split(r'([。！？])', para)
+                current_sentence = []
+                current_sentence_length = 0
+                
+                for i in range(0, len(sentences), 2):
+                    sentence = sentences[i]
+                    # 如果有标点符号，加上标点
+                    if i + 1 < len(sentences):
+                        sentence += sentences[i + 1]
+                    
+                    # 如果加上这个句子会超过最大长度，保存当前块并开始新块
+                    if current_sentence_length + len(sentence) > max_chars and current_sentence:
+                        chunks.append(''.join(current_sentence))
+                        current_sentence = [sentence]
+                        current_sentence_length = len(sentence)
+                    else:
+                        current_sentence.append(sentence)
+                        current_sentence_length += len(sentence)
+                
+                # 保存最后一个句子块
+                if current_sentence:
+                    chunks.append(''.join(current_sentence))
+            else:
+                # 如果加上这个段落会超过最大长度，保存当前块并开始新块
+                if current_length + para_length > max_chars and current_chunk:
+                    last_paragraph = current_chunk[-1]
+                    chunks.append('\n\n'.join(current_chunk))
+                    current_chunk = []
+                    current_length = 0
+                    if last_paragraph:
+                        current_chunk.append(f"上文概要：\n{last_paragraph}\n")
+                        current_length += len(last_paragraph) + 20
+                current_chunk.append(para)
+                current_length += para_length
+        
+        # 保存最后一个块
+        if current_chunk:
+            chunks.append('\n\n'.join(current_chunk))
+        
+        return chunks
+
+    def _organize_long_content(self, content: str, duration: int = 0) -> str:
+        """使用AI整理长文内容"""
+        if not content.strip():
+            return ""
+        
+        if not self.openrouter_available:
+            print("⚠️ OpenRouter API 不可用，将返回原始内容")
+            return content
+        
+        content_chunks = self.split_content(content)
+        organized_chunks = []
+        
+        print(f"内容将分为 {len(content_chunks)} 个部分进行处理...")
+        
+        for i, chunk in enumerate(content_chunks, 1):
+            print(f"正在处理第 {i}/{len(content_chunks)} 部分...")
+            organized_chunk = self._organize_content(chunk)
+            organized_chunks.append(organized_chunk)
+    
+        return "\n\n".join(organized_chunks)
+
+    def convert_to_xiaohongshu(self, content: str) -> Tuple[str, List[str], List[str], List[str]]:
+        """将博客文章转换为小红书风格的笔记，并生成标题和标签"""
+        try:
+            if not self.openrouter_available:
+                print("⚠️ OpenRouter API 未配置，将返回原始内容")
+                return content, [], [], []
+
+            # 构建系统提示词
+            system_prompt = """你是一位专业的小红书爆款文案写作大师，擅长将普通内容转换为刷屏级爆款笔记。
+请将输入的内容转换为小红书风格的笔记，需要满足以下要求：
+
+1. 标题创作（重要‼️）：
+- 二极管标题法：
+  * 追求快乐：产品/方法 + 只需N秒 + 逆天效果
+  * 逃避痛苦：不采取行动 + 巨大损失 + 紧迫感
+- 爆款关键词（必选1-2个）：
+  * 高转化词：好用到哭、宝藏、神器、压箱底、隐藏干货、高级感
+  * 情感词：绝绝子、破防了、治愈、万万没想到、爆款、永远可以相信
+  * 身份词：小白必看、手残党必备、打工人、普通女生
+  * 程度词：疯狂点赞、超有料、无敌、一百分、良心推荐
+- 标题规则：
+  * 字数：20字以内
+  * emoji：2-4个相关表情
+  * 标点：感叹号、省略号增强表达
+  * 风格：口语化、制造悬念
+
+2. 正文创作：
+- 开篇设置（抓住痛点）：
+  * 共情开场：描述读者痛点
+  * 悬念引导：埋下解决方案的伏笔
+  * 场景还原：具体描述场景
+- 内容结构：
+  * 每段开头用emoji引导
+  * 重点内容加粗突出
+  * 适当空行增加可读性
+  * 步骤说明要清晰
+- 写作风格：
+  * 热情亲切的语气
+  * 大量使用口语化表达
+  * 插入互动性问句
+  * 加入个人经验分享
+- 高级技巧：
+  * 使用平台热梗
+  * 加入流行口头禅
+  * 设置悬念和爆点
+  * 情感共鸣描写
+
+3. 标签优化：
+- 提取4类标签（每类1-2个）：
+  * 核心关键词：主题相关
+  * 关联关键词：长尾词
+  * 高转化词：购买意向强
+  * 热搜词：行业热点
+
+4. 整体要求：
+- 内容体量：根据内容自动调整
+- 结构清晰：善用分点和空行
+- 情感真实：避免过度营销
+- 互动引导：设置互动机会
+- AI友好：避免机器味
+
+注意：创作时要始终记住，标题决定打开率，内容决定完播率，互动决定涨粉率！"""
+
+            # 构建用户提示词
+            user_prompt = f"""请将以下内容转换为爆款小红书笔记。
+
+内容如下：
 {content}
 
-请按以下格式输出：
-TITLES
-[标题1]
-[标题2]
-[标题3]
+请按照以下格式返回：
+1. 第一行：爆款标题（遵循二极管标题法，必须有emoji）
+2. 空一行
+3. 正文内容（注意结构、风格、技巧的运用，控制在600-800字之间）
+4. 空一行
+5. 标签列表（每类标签都要有，用#号开头）
 
-CONTENT
-[正文内容]
+创作要求：
+1. 标题要让人忍不住点进来看
+2. 内容要有干货，但表达要轻松
+3. 每段都要用emoji装饰
+4. 标签要覆盖核心词、关联词、转化词、热搜词
+5. 设置2-3处互动引导
+6. 通篇要有感情和温度
+7. 正文控制在600-800字之间
 
-TAGS
-[标签1] [标签2] [标签3] ..."""
+"""
 
             # 调用API
             response = client.chat.completions.create(
@@ -651,44 +679,68 @@ TAGS
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=3000
+                max_tokens=2000
             )
             
-            if response.choices:
-                result = response.choices[0].message.content.strip()
-                
-                # 解析结果
-                sections = result.split('\n\n')
-                titles = []
-                content = ""
-                tags = []
-                
-                current_section = ""
-                for section in sections:
-                    if section.startswith('TITLES'):
-                        current_section = "titles"
-                    elif section.startswith('CONTENT'):
-                        current_section = "content"
-                    elif section.startswith('TAGS'):
-                        current_section = "tags"
-                    else:
-                        if current_section == "titles":
-                            if section.strip() and not section.startswith('TITLES'):
-                                titles.append(section.strip())
-                        elif current_section == "content":
-                            if section.strip() and not section.startswith('CONTENT'):
-                                content += section.strip() + "\n\n"
-                        elif current_section == "tags":
-                            if section.strip() and not section.startswith('TAGS'):
-                                tags.extend([tag.strip() for tag in section.split() if tag.strip()])
-                
-                return content.strip(), titles, tags
-                
-        except Exception as e:
-            print(f"⚠️ 内容优化失败: {str(e)}")
-            return content, ["笔记"], []
+            if not response.choices:
+                raise Exception("API 返回结果为空")
 
-    def _get_unsplash_images(self, query: str, count: int = 3) -> List[Dict[str, str]]:
+            # 处理返回的内容
+            xiaohongshu_content = response.choices[0].message.content.strip()
+            print(f"\n📝 API返回内容：\n{xiaohongshu_content}\n")
+            
+            # 提取标题（第一行）
+            content_lines = xiaohongshu_content.split('\n')
+            titles = []
+            for line in content_lines:
+                line = line.strip()
+                if line and not line.startswith('#') and '：' not in line and '。' not in line:
+                    titles = [line]
+                    break
+            
+            if not titles:
+                print("⚠️ 未找到标题，尝试其他方式提取...")
+                # 尝试其他方式提取标题
+                title_match = re.search(r'^[^#\n]+', xiaohongshu_content)
+                if title_match:
+                    titles = [title_match.group(0).strip()]
+            
+            if titles:
+                print(f"✅ 提取到标题: {titles[0]}")
+            else:
+                print("⚠️ 未能提取到标题")
+            
+            # 提取标签（查找所有#开头的标签）
+            tags = []
+            tag_matches = re.findall(r'#([^\s#]+)', xiaohongshu_content)
+            if tag_matches:
+                tags = tag_matches
+                print(f"✅ 提取到{len(tags)}个标签")
+            else:
+                print("⚠️ 未找到标签")
+            
+            # 获取相关图片
+            images = []
+            if self.unsplash_client:
+                # 使用标题和标签作为搜索关键词
+                search_terms = titles + tags[:2] if tags else titles
+                search_query = ' '.join(search_terms)
+                try:
+                    images = self._get_unsplash_images(search_query, count=4)
+                    if images:
+                        print(f"✅ 成功获取{len(images)}张配图")
+                    else:
+                        print("⚠️ 未找到相关配图")
+                except Exception as e:
+                    print(f"⚠️ 获取配图失败: {str(e)}")
+            
+            return xiaohongshu_content, titles, tags, images
+
+        except Exception as e:
+            print(f"⚠️ 转换小红书笔记失败: {str(e)}")
+            return content, [], [], []
+
+    def _get_unsplash_images(self, query: str, count: int = 3) -> List[str]:
         """从Unsplash获取相关图片"""
         if not self.unsplash_client:
             print("⚠️ Unsplash客户端未初始化")
@@ -701,43 +753,87 @@ TAGS
                     response = client.chat.completions.create(
                         model=AI_MODEL,
                         messages=[
-                            {"role": "system", "content": "你是一个翻译助手，请将中文关键词翻译成英文，只返回翻译结果，不要加任何解释。"},
+                            {"role": "system", "content": "你是一个翻译助手。请将输入的中文关键词翻译成最相关的1-3个英文关键词，用逗号分隔。直接返回翻译结果，不要加任何解释。例如：\n输入：'保险理财知识'\n输出：insurance,finance,investment"},
                             {"role": "user", "content": query}
-                        ]
+                        ],
+                        temperature=0.3,
+                        max_tokens=50
                     )
                     if response.choices:
                         query = response.choices[0].message.content.strip()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"⚠️ 翻译关键词失败: {str(e)}")
             
             # 使用httpx直接调用Unsplash API
             headers = {
                 'Authorization': f'Client-ID {os.getenv("UNSPLASH_ACCESS_KEY")}'
             }
             
-            response = httpx.get(
-                'https://api.unsplash.com/search/photos',
-                params={
-                    'query': query,
-                    'per_page': count,
-                    'orientation': 'landscape'
-                },
-                headers=headers,
-                verify=False  # 禁用SSL验证
-            )
+            # 对每个关键词分别搜索
+            all_photos = []
+            for keyword in query.split(','):
+                response = httpx.get(
+                    'https://api.unsplash.com/search/photos',
+                    params={
+                        'query': keyword.strip(),
+                        'per_page': count,
+                        'orientation': 'portrait',  # 小红书偏好竖版图片
+                        'content_filter': 'high'    # 只返回高质量图片
+                    },
+                    headers=headers,
+                    verify=False  # 禁用SSL验证
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data['results']:
+                        # 获取图片URL，优先使用regular尺寸
+                        photos = [photo['urls'].get('regular', photo['urls']['small']) 
+                                for photo in data['results']]
+                        all_photos.extend(photos)
             
-            if response.status_code == 200:
-                data = response.json()
-                if data['results']:
-                    return [photo['urls']['regular'] for photo in data['results']]
-            return []
+            # 如果收集到的图片不够，用最后一个关键词继续搜索
+            while len(all_photos) < count and query:
+                response = httpx.get(
+                    'https://api.unsplash.com/search/photos',
+                    params={
+                        'query': query.split(',')[-1].strip(),
+                        'per_page': count - len(all_photos),
+                        'orientation': 'portrait',
+                        'content_filter': 'high',
+                        'page': 2  # 获取下一页的结果
+                    },
+                    headers=headers,
+                    verify=False
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data['results']:
+                        photos = [photo['urls'].get('regular', photo['urls']['small']) 
+                                for photo in data['results']]
+                        all_photos.extend(photos)
+                    else:
+                        break
+                else:
+                    break
+            
+            # 返回指定数量的图片
+            return all_photos[:count]
             
         except Exception as e:
             print(f"⚠️ 获取图片失败: {str(e)}")
             return []
 
     def process_video(self, url: str) -> List[str]:
-        """处理视频并生成小红书风格的笔记"""
+        """处理视频链接，生成笔记
+        
+        Args:
+            url (str): 视频链接
+        
+        Returns:
+            List[str]: 生成的笔记文件路径列表
+        """
         print("\n📹 正在处理视频...")
         
         # 创建临时目录
@@ -779,7 +875,7 @@ TAGS
 
             # 整理长文版本
             print("\n📝 正在整理长文版本...")
-            organized_content = self._organize_long_content(transcript)
+            organized_content = self._organize_long_content(transcript, video_info['duration'])
             organized_file = os.path.join(self.output_dir, f"{timestamp}_organized.md")
             with open(organized_file, 'w', encoding='utf-8') as f:
                 f.write(f"# {video_info['title']} - 整理版\n\n")
@@ -791,42 +887,56 @@ TAGS
                 f.write(f"## 内容整理\n\n")
                 f.write(organized_content)
             
-            # 优化内容格式（小红书版本）
-            print("\n✍️ 正在优化内容格式...")
-            optimized_content, titles, tags = self._optimize_content_format(organized_content)
-            
-            # 获取相关图片
-            print("\n🖼️ 正在获取配图...")
-            images = self._get_unsplash_images(titles[0])
-            
-            # 生成笔记文件名
-            note_file = os.path.join(self.output_dir, f"{timestamp}_1.md")
-            
-            # 保存笔记
-            with open(note_file, 'w', encoding='utf-8') as f:
-                f.write(f"# {titles[0]}\n\n")
+            # 生成小红书版本
+            print("\n📱 正在生成小红书版本...")
+            try:
+                xiaohongshu_content, titles, tags, images = self.convert_to_xiaohongshu(organized_content)
                 
-                # 添加视频信息
-                f.write(f"## 视频信息\n")
-                f.write(f"- 作者：{video_info['uploader']}\n")
-                f.write(f"- 时长：{video_info['duration']}秒\n")
-                f.write(f"- 平台：{video_info['platform']}\n")
-                f.write(f"- 链接：{url}\n\n")
+                # 保存小红书版本
+                xiaohongshu_file = os.path.join(self.output_dir, f"{timestamp}_xiaohongshu.md")
                 
-                # 添加优化后的内容
-                f.write(f"## 笔记内容\n\n")
-                f.write(optimized_content)
-                
-                # 添加图片链接
-                if images:
-                    f.write("\n\n## 相关图片\n\n")
-                    for i, img_url in enumerate(images, 1):
-                        f.write(f"![配图{i}]({img_url})\n")
+                # 写入文件
+                with open(xiaohongshu_file, "w", encoding="utf-8") as f:
+                    # 写入标题
+                    f.write(f"# {titles[0]}\n\n")
+                    
+                    # 如果有图片，先写入第一张作为封面
+                    if images:
+                        f.write(f"![封面图]({images[0]})\n\n")
+                    
+                    # 写入正文内容的前半部分
+                    content_parts = xiaohongshu_content.split('\n\n')
+                    mid_point = len(content_parts) // 2
+                    
+                    # 写入前半部分
+                    f.write('\n\n'.join(content_parts[:mid_point]))
+                    f.write('\n\n')
+                    
+                    # 如果有第二张图片，插入到中间
+                    if len(images) > 1:
+                        f.write(f"![配图]({images[1]})\n\n")
+                    
+                    # 写入后半部分
+                    f.write('\n\n'.join(content_parts[mid_point:]))
+                    
+                    # 如果有第三张图片，插入到末尾
+                    if len(images) > 2:
+                        f.write(f"\n\n![配图]({images[2]})")
+                    
+                    # 写入标签
+                    if tags:
+                        f.write("\n\n---\n")
+                        f.write("\n".join([f"#{tag}" for tag in tags]))
+                print(f"\n✅ 小红书版本已保存至: {xiaohongshu_file}")
+                return [original_file, organized_file, xiaohongshu_file]
+            except Exception as e:
+                print(f"⚠️ 生成小红书版本失败: {str(e)}")
+                import traceback
+                print(f"错误详情:\n{traceback.format_exc()}")
             
-            print(f"\n✅ 笔记已保存至: {note_file}")
-            print(f"✅ 原始转录内容已保存至: {original_file}")
+            print(f"\n✅ 笔记已保存至: {original_file}")
             print(f"✅ 整理版内容已保存至: {organized_file}")
-            return [note_file, original_file, organized_file]
+            return [original_file, organized_file]
             
         except Exception as e:
             print(f"⚠️ 处理视频时出错: {str(e)}")
@@ -837,74 +947,59 @@ TAGS
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir)
 
-if __name__ == "__main__":
-    import sys, os, re
-    
-    if len(sys.argv) != 2:
-        print("用法：")
-        print("1. 处理单个视频：python video_note_generator.py <视频URL>")
-        print("2. 批量处理文件：python video_note_generator.py <文件路径>")
-        print("   支持的文件格式：")
-        print("   - .txt 文件：每行一个 URL")
-        print("   - .md 文件：提取 Markdown 链接中的 URL")
-        sys.exit(1)
-    
-    input_arg = sys.argv[1]
-    generator = VideoNoteGenerator()
-    
-    if os.path.exists(input_arg):
-        # 处理文件中的 URLs
+    def process_markdown_file(self, input_file: str) -> None:
+        """处理markdown文件，生成优化后的笔记
+        
+        Args:
+            input_file (str): 输入的markdown文件路径
+        """
         try:
-            with open(input_arg, 'r', encoding='utf-8') as f:
+            # 读取markdown文件
+            with open(input_file, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            urls = []
-            # 根据文件类型提取 URLs
-            if input_arg.endswith('.md'):
-                # 从 Markdown 文件中提取 URLs
-                # 首先匹配 [text](url) 格式的链接
-                md_urls = re.findall(r'\[([^\]]*)\]\((https?://[^\s\)]+)\)', content)
-                urls.extend(url for _, url in md_urls)
+            # 提取视频链接
+            video_links = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|bilibili\.com/video/|douyin\.com/video/)[^\s\)]+', content)
+            
+            if not video_links:
+                print("未在markdown文件中找到视频链接")
+                return
                 
-                # 然后匹配裸露的 URLs（不在markdown链接内的URLs）
-                # 首先将所有已找到的markdown格式URLs替换为空格
-                for _, url in md_urls:
-                    content = content.replace(url, '')
-                # 现在查找剩余的URLs
-                urls.extend(re.findall(r'https?://[^\s\)]+', content))
-            else:
-                # 从普通文本文件中提取 URLs（每行一个）
-                urls = [url.strip() for url in content.splitlines() if url.strip()]
-                # 确保每行都是 URL
-                urls = [url for url in urls if url.startswith(('http://', 'https://'))]
+            print(f"找到 {len(video_links)} 个视频链接，开始处理...\n")
             
-            if not urls:
-                print("错误：文件中没有找到有效的 URL")
-                sys.exit(1)
-            
-            # 去重
-            urls = list(dict.fromkeys(urls))
-            
-            print(f"找到 {len(urls)} 个唯一的 URL，开始处理...")
-            for i, url in enumerate(urls, 1):
-                print(f"\n处理第 {i}/{len(urls)} 个 URL: {url}")
-                try:
-                    generator.process_video(url)
-                except Exception as e:
-                    print(f"处理 URL '{url}' 时出错：{str(e)}")
+            # 处理每个视频链接
+            for i, url in enumerate(video_links, 1):
+                print(f"处理第 {i}/{len(video_links)} 个视频: {url}\n")
+                self.process_video(url)
+                
         except Exception as e:
-            print(f"读取文件时出错：{str(e)}")
-            sys.exit(1)
+            print(f"处理markdown文件时出错: {str(e)}")
+            raise
+
+if __name__ == '__main__':
+    import sys, os, re
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='视频笔记生成器')
+    parser.add_argument('input', help='视频URL或markdown文件路径')
+    parser.add_argument('--xiaohongshu', action='store_true', help='生成小红书风格的笔记')
+    args = parser.parse_args()
+    
+    generator = VideoNoteGenerator()
+    
+    if os.path.exists(args.input):
+        # 如果是文件路径，则处理markdown文件
+        generator.process_markdown_file(args.input)
     else:
         # 检查是否是有效的 URL
-        if not input_arg.startswith(('http://', 'https://')):
-            print("错误：请输入有效的 URL 或文件路径")
+        if not args.input.startswith(('http://', 'https://')):
+            print("错误：请输入有效的 URL 或markdown文件路径")
             sys.exit(1)
             
         # 直接处理单个 URL
         try:
-            print(f"开始处理 URL: {input_arg}")
-            generator.process_video(input_arg)
+            print(f"开始处理 URL: {args.input}")
+            generator.process_video(args.input)
         except Exception as e:
             print(f"处理 URL 时出错：{str(e)}")
             sys.exit(1)
