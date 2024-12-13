@@ -976,30 +976,115 @@ Markdown格式要求：
             print(f"处理markdown文件时出错: {str(e)}")
             raise
 
+def extract_urls_from_text(text: str) -> list:
+    """
+    从文本中提取所有有效的URL
+    支持的URL格式：
+    - 视频平台URL (YouTube, Bilibili, 抖音等)
+    - 包含http://或https://的标准URL
+    - 短链接URL (如t.co等)
+    
+    Args:
+        text: 输入文本
+        
+    Returns:
+        list: 提取到的有效URL列表
+    """
+    # URL正则模式
+    url_patterns = [
+        # 标准URL
+        r'https?://[^\s<>\[\]"\']+[^\s<>\[\]"\'.,]',
+        # 短链接
+        r'https?://[a-zA-Z0-9]+\.[a-zA-Z]{2,3}/[^\s<>\[\]"\']+',
+        # Bilibili
+        r'BV[a-zA-Z0-9]{10}',
+        # 抖音分享链接
+        r'v\.douyin\.com/[a-zA-Z0-9]+',
+    ]
+    
+    urls = []
+    for pattern in url_patterns:
+        matches = re.finditer(pattern, text, re.IGNORECASE)
+        for match in matches:
+            url = match.group()
+            # 对于不完整的BV号，添加完整的bilibili前缀
+            if url.startswith('BV'):
+                url = f'https://www.bilibili.com/video/{url}'
+            urls.append(url)
+    
+    # 去重并保持顺序
+    seen = set()
+    return [url for url in urls if not (url in seen or seen.add(url))]
+
 if __name__ == '__main__':
     import sys, os, re
     import argparse
     
     parser = argparse.ArgumentParser(description='视频笔记生成器')
-    parser.add_argument('input', help='视频URL或markdown文件路径')
+    parser.add_argument('input', help='输入源：视频URL、包含URL的文件或markdown文件')
     parser.add_argument('--xiaohongshu', action='store_true', help='生成小红书风格的笔记')
     args = parser.parse_args()
     
     generator = VideoNoteGenerator()
     
     if os.path.exists(args.input):
-        # 如果是文件路径，则处理markdown文件
-        generator.process_markdown_file(args.input)
-    else:
-        # 检查是否是有效的 URL
-        if not args.input.startswith(('http://', 'https://')):
-            print("错误：请输入有效的 URL 或markdown文件路径")
-            sys.exit(1)
-            
-        # 直接处理单个 URL
+        # 读取文件内容
         try:
-            print(f"开始处理 URL: {args.input}")
+            with open(args.input, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            try:
+                # 尝试使用gbk编码
+                with open(args.input, 'r', encoding='gbk') as f:
+                    content = f.read()
+            except Exception as e:
+                print(f"⚠️ 无法读取文件: {str(e)}")
+                sys.exit(1)
+        
+        # 如果是markdown文件，直接处理
+        if args.input.endswith('.md'):
+            print(f"📝 处理Markdown文件: {args.input}")
+            generator.process_markdown_file(args.input)
+        else:
+            # 从文件内容中提取URL
+            urls = extract_urls_from_text(content)
+            
+            if not urls:
+                print("⚠️ 未在文件中找到有效的URL")
+                sys.exit(1)
+            
+            print(f"📋 从文件中找到 {len(urls)} 个URL:")
+            for i, url in enumerate(urls, 1):
+                print(f"  {i}. {url}")
+            
+            print("\n开始处理URL...")
+            for i, url in enumerate(urls, 1):
+                print(f"\n处理第 {i}/{len(urls)} 个URL: {url}")
+                try:
+                    generator.process_video(url)
+                except Exception as e:
+                    print(f"⚠️ 处理URL时出错：{str(e)}")
+                    continue
+    else:
+        # 检查是否是有效的URL
+        if not args.input.startswith(('http://', 'https://')):
+            print("⚠️ 错误：请输入有效的URL、包含URL的文件或markdown文件路径")
+            print("\n使用示例：")
+            print("1. 处理单个视频：")
+            print("   python video_note_generator.py https://example.com/video")
+            print("\n2. 处理包含URL的文件：")
+            print("   python video_note_generator.py urls.txt")
+            print("   - 文件中的URL可以是任意格式，每行一个或多个")
+            print("   - 支持带有其他文字的行")
+            print("   - 支持使用#注释")
+            print("\n3. 处理Markdown文件：")
+            print("   python video_note_generator.py notes.md")
+            sys.exit(1)
+        
+        # 处理单个URL
+        try:
+            print(f"🎥 处理视频URL: {args.input}")
             generator.process_video(args.input)
         except Exception as e:
-            print(f"处理 URL 时出错：{str(e)}")
+            print(f"⚠️ 处理URL时出错：{str(e)}")
             sys.exit(1)
