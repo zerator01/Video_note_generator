@@ -120,7 +120,7 @@ python check_environment.py
 ```
 3. 运行生成器：
 ```bash
-python video_note_generator.py urls.txt
+python video_note_generator.py test.md
 ```
 
 ## 📄 输出文件
